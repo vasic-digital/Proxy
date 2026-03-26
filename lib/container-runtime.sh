@@ -6,8 +6,15 @@
 
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Only set SCRIPT_DIR if not already set
+if [[ -z "${SCRIPT_DIR:-}" ]]; then
+    readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+# Only set PROJECT_ROOT if not already set
+if [[ -z "${PROJECT_ROOT:-}" ]]; then
+    readonly PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 
 #######################################
 # Detect available container runtime

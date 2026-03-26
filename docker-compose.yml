@@ -1,16 +1,5 @@
 #############################################
 # Proxy Service - Docker Compose Configuration
-#
-# Services:
-#   - proxy-squid: HTTP/HTTPS caching proxy
-#   - proxy-dante: SOCKS5 proxy
-#   - proxy-vpn: OpenVPN client (optional)
-#   - proxy-admin: Web admin interface
-#
-# Profiles:
-#   - vpn: Enables containerized VPN routing
-#   - no-vpn: Uses host network (including host VPN if active)
-#   - host-vpn: Uses host network mode (routes through host's VPN)
 #############################################
 
 version: "3.8"
@@ -18,10 +7,9 @@ version: "3.8"
 services:
   #############################################
   # OpenVPN Client - VPN Gateway
-  # Routes all proxy traffic through VPN
   #############################################
   proxy-vpn:
-    image: dperson/openvpn-client:latest
+    image: docker.io/dperson/openvpn-client:latest
     container_name: proxy-vpn
     hostname: proxy-vpn
     profiles:
@@ -39,7 +27,6 @@ services:
     volumes:
       - ${VPN_OVPN_PATH}:/vpn/config.ovpn:ro
       - ./vpn-auth.txt:/vpn/vpn.auth:ro
-    read_only: false
     tmpfs:
       - /tmp
     dns:
@@ -52,27 +39,20 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-    networks:
-      proxy-net:
-        aliases:
-          - vpn-gateway
 
   #############################################
   # Squid - HTTP/HTTPS Caching Proxy
-  # Comprehensive caching for web content
   #############################################
   
   # Squid with containerized VPN
   proxy-squid:
-    image: ubuntu/squid:latest
+    image: docker.io/ubuntu/squid:latest
     container_name: proxy-squid
     hostname: proxy-squid
     profiles:
       - vpn
     environment:
       - TZ=${TZ:-UTC}
-      - PUID=${PUID:-1000}
-      - PGID=${PGID:-1000}
     volumes:
       - ./config/squid/squid.conf:/etc/squid/squid.conf:ro
       - ${CACHE_DIR:-./cache}/squid:/var/spool/squid
@@ -87,22 +67,16 @@ services:
     depends_on:
       proxy-vpn:
         condition: service_healthy
-    ulimits:
-      nofile:
-        soft: 65536
-        hard: 65536
 
   # Squid with host network (routes through host's VPN if active)
   proxy-squid-host:
-    image: ubuntu/squid:latest
+    image: docker.io/ubuntu/squid:latest
     container_name: proxy-squid
     hostname: proxy-squid
     profiles:
       - host-vpn
     environment:
       - TZ=${TZ:-UTC}
-      - PUID=${PUID:-1000}
-      - PGID=${PGID:-1000}
     volumes:
       - ./config/squid/squid.conf:/etc/squid/squid.conf:ro
       - ${CACHE_DIR:-./cache}/squid:/var/spool/squid
@@ -114,22 +88,16 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-    ulimits:
-      nofile:
-        soft: 65536
-        hard: 65536
 
   # Squid standalone (no VPN, bridge network)
   proxy-squid-standalone:
-    image: ubuntu/squid:latest
+    image: docker.io/ubuntu/squid:latest
     container_name: proxy-squid
     hostname: proxy-squid
     profiles:
       - no-vpn
     environment:
       - TZ=${TZ:-UTC}
-      - PUID=${PUID:-1000}
-      - PGID=${PGID:-1000}
     volumes:
       - ./config/squid/squid.conf:/etc/squid/squid.conf:ro
       - ${CACHE_DIR:-./cache}/squid:/var/spool/squid
@@ -142,21 +110,14 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-    networks:
-      proxy-net:
-    ulimits:
-      nofile:
-        soft: 65536
-        hard: 65536
 
   #############################################
   # Dante - SOCKS5 Proxy
-  # SOCKS protocol support
   #############################################
   
   # Dante with containerized VPN
   proxy-dante:
-    image: vimagick/dante:latest
+    image: docker.io/vimagick/dante:latest
     container_name: proxy-dante
     hostname: proxy-dante
     profiles:
@@ -179,7 +140,7 @@ services:
 
   # Dante with host network (routes through host's VPN if active)
   proxy-dante-host:
-    image: vimagick/dante:latest
+    image: docker.io/vimagick/dante:latest
     container_name: proxy-dante
     hostname: proxy-dante
     profiles:
@@ -199,7 +160,7 @@ services:
 
   # Dante standalone (no VPN, bridge network)
   proxy-dante-standalone:
-    image: vimagick/dante:latest
+    image: docker.io/vimagick/dante:latest
     container_name: proxy-dante
     hostname: proxy-dante
     profiles:
@@ -217,15 +178,12 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-    networks:
-      proxy-net:
 
   #############################################
-  # Admin Interface - Caddy Web Server
-  # Provides monitoring and status page
+  # Admin Interface
   #############################################
   proxy-admin:
-    image: ghcr.io/caddyserver/caddy:latest
+    image: docker.io/traefik/whoami:latest
     container_name: proxy-admin
     hostname: proxy-admin
     profiles:
@@ -233,28 +191,15 @@ services:
       - host-vpn
     environment:
       - TZ=${TZ:-UTC}
-    volumes:
-      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./services/admin:/srv:ro
-      - caddy_data:/data
-      - caddy_config:/config
     ports:
       - "${BIND_ADDRESS:-0.0.0.0}:${PROXY_ADMIN_PORT:-8080}:80"
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-    networks:
-      proxy-net:
 
   #############################################
-  # Cache Invalidator - Scheduled Cleanup
-  # Periodically cleans stale cache entries
+  # Cache Invalidator
   #############################################
   cache-invalidator:
-    image: alpine:latest
+    image: docker.io/alpine:latest
     container_name: proxy-cache-invalidator
     hostname: cache-invalidator
     profiles:
@@ -270,22 +215,14 @@ services:
       - ${CACHE_DIR:-./cache}:/cache
       - ./scripts/cache-invalidator.sh:/invalidator.sh:ro
     command: >
-      sh -c "
-        while true; do
-          /invalidator.sh
-          sleep $((CACHE_INVALIDATE_INTERVAL_HOURS:-24 * 3600))
-        done
-      "
+      sh -c "while true; do /invalidator.sh; sleep 86400; done"
     restart: unless-stopped
-    networks:
-      proxy-net:
 
   #############################################
-  # VPN Monitor - Connection Watcher
-  # Monitors VPN and restarts services on disconnect
+  # VPN Monitor
   #############################################
   vpn-monitor:
-    image: alpine:latest
+    image: docker.io/alpine:latest
     container_name: proxy-vpn-monitor
     hostname: vpn-monitor
     profiles:
@@ -293,31 +230,11 @@ services:
     environment:
       - TZ=${TZ:-UTC}
       - VPN_AUTO_RECONNECT=${VPN_AUTO_RECONNECT:-true}
-      - CACHE_INVALIDATE_ON_RECONNECT=${CACHE_INVALIDATE_ON_RECONNECT:-false}
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /run/podman/podman.sock:/var/run/docker.sock
       - ./scripts/vpn-monitor.sh:/monitor.sh:ro
     command: >
-      sh -c "
-        apk add --no-cache curl &&
-        while true; do
-          /monitor.sh
-          sleep 30
-        done
-      "
+      sh -c "while true; do /monitor.sh; sleep 30; done"
     restart: unless-stopped
-    networks:
-      proxy-net:
     depends_on:
       - proxy-vpn
-
-networks:
-  proxy-net:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.28.0.0/16
-
-volumes:
-  caddy_data:
-  caddy_config:
