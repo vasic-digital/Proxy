@@ -1,0 +1,367 @@
+#!/usr/bin/env bash
+#######################################
+# Proxy Service Start Script
+# Starts all proxy services with VPN support
+#######################################
+
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/container-runtime.sh"
+
+#######################################
+# Show usage information
+#######################################
+usage() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Start Proxy service with caching and VPN routing.
+
+Options:
+    -h, --help          Show this help message
+    -v, --verbose       Enable verbose output
+    -p, --pull          Pull latest images before starting
+    -n, --no-vpn        Force start without VPN
+    -s, --status        Show status after starting
+    -d, --dry-run       Show what would be done without executing
+
+Examples:
+    $(basename "$0")              Start with VPN (if configured)
+    $(basename "$0") --no-vpn     Start without VPN
+    $(basename "$0") -pvs         Pull, start verbose, show status
+EOF
+}
+
+#######################################
+# Pull latest container images
+#######################################
+pull_images() {
+    log "info" "Pulling latest container images..."
+    
+    local images=(
+        "ubuntu/squid:latest"
+        "vimagick/dante:latest"
+        "dperson/openvpn-client:latest"
+        "ghcr.io/caddyserver/caddy:latest"
+    )
+    
+    for image in "${images[@]}"; do
+        log "debug" "Pulling $image..."
+        case "$CONTAINER_RUNTIME" in
+            podman)
+                podman pull "$image" 2>/dev/null || log "warn" "Failed to pull $image"
+                ;;
+            docker)
+                docker pull "$image" 2>/dev/null || log "warn" "Failed to pull $image"
+                ;;
+        esac
+    done
+    
+    log "info" "Image pull complete"
+}
+
+#######################################
+# Check if services are already running
+#######################################
+check_running() {
+    local running=false
+    
+    if is_container_running "proxy-squid"; then
+        log "warn" "Squid proxy already running"
+        running=true
+    fi
+    
+    if is_container_running "proxy-dante"; then
+        log "warn" "Dante SOCKS proxy already running"
+        running=true
+    fi
+    
+    if [[ "${USE_VPN:-false}" == "true" ]] && is_container_running "proxy-vpn"; then
+        log "warn" "VPN container already running"
+        running=true
+    fi
+    
+    if [[ "$running" == "true" ]]; then
+        log "info" "Use './stop' to stop services first, or './restart' to restart"
+        return 1
+    fi
+    
+    return 0
+}
+
+#######################################
+# Start VPN container
+#######################################
+start_vpn() {
+    if [[ "${USE_VPN:-false}" != "true" ]]; then
+        log "info" "VPN disabled, skipping"
+        return 0
+    fi
+    
+    log "info" "Starting VPN container..."
+    
+    local vpn_config="${VPN_OVPN_PATH}"
+    local vpn_auth="$SCRIPT_DIR/vpn-auth.txt"
+    
+    if [[ ! -f "$vpn_config" ]]; then
+        log "error" "VPN config not found: $vpn_config"
+        return 1
+    fi
+    
+    if [[ ! -f "$vpn_auth" ]]; then
+        log "error" "VPN auth file not found: $vpn_auth"
+        return 1
+    fi
+    
+    $COMPOSE_CMD up -d proxy-vpn 2>&1 || {
+        log "error" "Failed to start VPN container"
+        return 1
+    }
+    
+    log "info" "Waiting for VPN connection..."
+    local max_wait=60
+    local waited=0
+    
+    while [[ $waited -lt $max_wait ]]; do
+        if check_vpn_status | grep -q "connected"; then
+            log "info" "VPN connected successfully"
+            return 0
+        fi
+        sleep 2
+        ((waited += 2))
+        log "debug" "Waiting for VPN... ($waited/$max_wait seconds)"
+    done
+    
+    log "warn" "VPN connection timeout, continuing anyway"
+    return 0
+}
+
+#######################################
+# Start Squid HTTP/HTTPS proxy
+#######################################
+start_squid() {
+    log "info" "Starting Squid proxy..."
+    
+    $COMPOSE_CMD up -d proxy-squid 2>&1 || {
+        log "error" "Failed to start Squid"
+        return 1
+    }
+    
+    sleep 2
+    
+    if is_container_running "proxy-squid"; then
+        log "info" "Squid proxy started on port ${HTTP_PROXY_PORT:-3128}"
+    else
+        log "error" "Squid failed to start"
+        return 1
+    fi
+}
+
+#######################################
+# Start Dante SOCKS proxy
+#######################################
+start_dante() {
+    log "info" "Starting Dante SOCKS proxy..."
+    
+    $COMPOSE_CMD up -d proxy-dante 2>&1 || {
+        log "error" "Failed to start Dante"
+        return 1
+    }
+    
+    sleep 2
+    
+    if is_container_running "proxy-dante"; then
+        log "info" "Dante SOCKS proxy started on port ${SOCKS_PROXY_PORT:-1080}"
+    else
+        log "error" "Dante failed to start"
+        return 1
+    fi
+}
+
+#######################################
+# Start admin interface (Caddy)
+#######################################
+start_admin() {
+    log "info" "Starting admin interface..."
+    
+    $COMPOSE_CMD up -d proxy-admin 2>&1 || {
+        log "warn" "Failed to start admin interface"
+        return 0
+    }
+    
+    sleep 2
+    
+    if is_container_running "proxy-admin"; then
+        log "info" "Admin interface started on port ${PROXY_ADMIN_PORT:-8080}"
+    fi
+}
+
+#######################################
+# Initialize cache directories
+#######################################
+init_cache() {
+    log "info" "Initializing cache directories..."
+    
+    mkdir -p "$CACHE_DIR/squid"
+    mkdir -p "$CACHE_DIR/streaming"
+    
+    if [[ -d "$CACHE_DIR/squid" ]]; then
+        chmod 755 "$CACHE_DIR/squid"
+    fi
+}
+
+#######################################
+# Show service status
+#######################################
+show_status() {
+    echo ""
+    echo "=========================================="
+    echo "Proxy Service Status"
+    echo "=========================================="
+    
+    local containers=("proxy-squid" "proxy-dante" "proxy-admin")
+    
+    if [[ "${USE_VPN:-false}" == "true" ]]; then
+        containers=("proxy-vpn" "${containers[@]}")
+    fi
+    
+    for container in "${containers[@]}"; do
+        if is_container_running "$container"; then
+            local status
+            status=$(get_container_status "$container")
+            echo "  ✓ $container: $status"
+        else
+            echo "  ✗ $container: not running"
+        fi
+    done
+    
+    echo ""
+    echo "Connection Information:"
+    echo "  HTTP Proxy:  ${BIND_ADDRESS:-0.0.0.0}:${HTTP_PROXY_PORT:-3128}"
+    echo "  SOCKS Proxy: ${BIND_ADDRESS:-0.0.0.0}:${SOCKS_PROXY_PORT:-1080}"
+    echo "  Admin Panel: http://localhost:${PROXY_ADMIN_PORT:-8080}"
+    
+    if [[ "${USE_VPN:-false}" == "true" ]]; then
+        local vpn_status
+        vpn_status=$(check_vpn_status)
+        echo "  VPN Status:  $vpn_status"
+    fi
+    
+    echo ""
+    get_cache_stats
+    echo "=========================================="
+}
+
+#######################################
+# Main function
+#######################################
+main() {
+    local PULL="false"
+    local NO_VPN="false"
+    local SHOW_STATUS="false"
+    local DRY_RUN="false"
+    local VERBOSE="false"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -v|--verbose)
+                VERBOSE="true"
+                LOG_LEVEL="debug"
+                shift
+                ;;
+            -p|--pull)
+                PULL="true"
+                shift
+                ;;
+            -n|--no-vpn)
+                NO_VPN="true"
+                shift
+                ;;
+            -s|--status)
+                SHOW_STATUS="true"
+                shift
+                ;;
+            -d|--dry-run)
+                DRY_RUN="true"
+                shift
+                ;;
+            *)
+                log "error" "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    export LOG_LEVEL
+    
+    log "info" "=========================================="
+    log "info" "Starting Proxy Service"
+    log "info" "=========================================="
+    
+    # Load environment
+    load_environment
+    
+    # Override VPN setting if --no-vpn specified
+    if [[ "$NO_VPN" == "true" ]]; then
+        USE_VPN="false"
+        log "info" "VPN disabled by command line"
+    fi
+    
+    # Initialize runtime
+    if ! init_runtime; then
+        exit 1
+    fi
+    
+    log "info" "Container runtime: $CONTAINER_RUNTIME"
+    log "info" "VPN enabled: ${USE_VPN:-false}"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "info" "Dry run mode - no changes will be made"
+        log "info" "Would start: Squid, Dante${USE_VPN:-false} == 'true' && echo ', VPN' || echo ''"
+        exit 0
+    fi
+    
+    # Run initialization
+    "$SCRIPT_DIR/init" --check || {
+        log "error" "Initialization check failed. Run './init' first."
+        exit 1
+    }
+    
+    # Check if already running
+    if ! check_running; then
+        exit 1
+    fi
+    
+    # Pull images if requested
+    if [[ "$PULL" == "true" ]]; then
+        pull_images
+    fi
+    
+    # Initialize cache
+    init_cache
+    
+    # Start services in order
+    if [[ "${USE_VPN:-false}" == "true" ]]; then
+        start_vpn || log "warn" "VPN start failed, continuing without VPN"
+    fi
+    
+    start_squid || exit 1
+    start_dante || exit 1
+    start_admin || true
+    
+    log "info" "=========================================="
+    log "info" "Proxy Service Started Successfully"
+    log "info" "=========================================="
+    
+    if [[ "$SHOW_STATUS" == "true" ]]; then
+        show_status
+    fi
+}
+
+main "$@"

@@ -1,0 +1,42 @@
+# Environment files (contain secrets)
+.env
+.env.local
+.env.*.local
+
+# VPN credentials
+vpn-auth.txt
+*.ovpn
+credentials.txt
+
+# Cache directories
+cache/
+ Cache/
+
+# Logs
+logs/*.log
+*.log
+
+# Configuration with sensitive data
+config/squid/passwords
+config/squid/certs/
+config/htpasswd
+
+# Runtime files
+*.pid
+*.sock
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Temporary files
+tmp/
+temp/

@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+#######################################
+# Proxy Service Stop Script
+# Stops all proxy services gracefully
+#######################################
+
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/container-runtime.sh"
+
+#######################################
+# Show usage information
+#######################################
+usage() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Stop Proxy service gracefully.
+
+Options:
+    -h, --help          Show this help message
+    -v, --verbose       Enable verbose output
+    -r, --remove        Remove containers after stopping
+    -p, --purge         Remove containers and images
+    -c, --clean-cache   Clear cache on stop
+
+Examples:
+    $(basename "$0")              Stop services
+    $(basename "$0") -r           Stop and remove containers
+    $(basename "$0") -p           Stop, remove containers and images
+    $(basename "$0") --clean-cache Stop and clear cache
+EOF
+}
+
+#######################################
+# Stop a container by name
+# Arguments:
+#   $1 - Container name
+#######################################
+stop_container() {
+    local container="$1"
+    
+    if ! is_container_running "$container"; then
+        log "debug" "$container is not running"
+        return 0
+    fi
+    
+    log "info" "Stopping $container..."
+    
+    case "$CONTAINER_RUNTIME" in
+        podman)
+            podman stop -t 30 "$container" 2>/dev/null || true
+            ;;
+        docker)
+            docker stop -t 30 "$container" 2>/dev/null || true
+            ;;
+    esac
+    
+    log "info" "$container stopped"
+}
+
+#######################################
+# Remove a container by name
+# Arguments:
+#   $1 - Container name
+#######################################
+remove_container() {
+    local container="$1"
+    
+    log "info" "Removing $container..."
+    
+    case "$CONTAINER_RUNTIME" in
+        podman)
+            podman rm -f "$container" 2>/dev/null || true
+            ;;
+        docker)
+            docker rm -f "$container" 2>/dev/null || true
+            ;;
+    esac
+    
+    log "info" "$container removed"
+}
+
+#######################################
+# Remove container images
+#######################################
+remove_images() {
+    log "info" "Removing proxy images..."
+    
+    local images=(
+        "ubuntu/squid:latest"
+        "vimagick/dante:latest"
+        "dperson/openvpn-client:latest"
+        "ghcr.io/caddyserver/caddy:latest"
+    )
+    
+    for image in "${images[@]}"; do
+        case "$CONTAINER_RUNTIME" in
+            podman)
+                podman rmi -f "$image" 2>/dev/null || true
+                ;;
+            docker)
+                docker rmi -f "$image" 2>/dev/null || true
+                ;;
+        esac
+    done
+    
+    log "info" "Images removed"
+}
+
+#######################################
+# Clear cache directory
+#######################################
+clear_cache() {
+    log "info" "Clearing cache..."
+    
+    if [[ -d "$CACHE_DIR" ]]; then
+        rm -rf "$CACHE_DIR"/* 2>/dev/null || true
+        log "info" "Cache cleared: $CACHE_DIR"
+    else
+        log "warn" "Cache directory not found: $CACHE_DIR"
+    fi
+}
+
+#######################################
+# Show final status
+#######################################
+show_final_status() {
+    echo ""
+    echo "=========================================="
+    echo "Proxy Service Status After Stop"
+    echo "=========================================="
+    
+    local containers=("proxy-squid" "proxy-dante" "proxy-admin" "proxy-vpn")
+    
+    for container in "${containers[@]}"; do
+        if is_container_running "$container"; then
+            echo "  ✓ $container: running"
+        else
+            echo "  ✗ $container: stopped"
+        fi
+    done
+    
+    echo "=========================================="
+}
+
+#######################################
+# Main function
+#######################################
+main() {
+    local REMOVE="false"
+    local PURGE="false"
+    local CLEAN_CACHE="false"
+    local VERBOSE="false"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -v|--verbose)
+                VERBOSE="true"
+                LOG_LEVEL="debug"
+                shift
+                ;;
+            -r|--remove)
+                REMOVE="true"
+                shift
+                ;;
+            -p|--purge)
+                PURGE="true"
+                REMOVE="true"
+                shift
+                ;;
+            -c|--clean-cache)
+                CLEAN_CACHE="true"
+                shift
+                ;;
+            *)
+                log "error" "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    export LOG_LEVEL
+    
+    log "info" "=========================================="
+    log "info" "Stopping Proxy Service"
+    log "info" "=========================================="
+    
+    # Load environment
+    load_environment
+    
+    # Initialize runtime
+    if ! init_runtime; then
+        log "warn" "Could not detect container runtime, attempting direct stop..."
+    fi
+    
+    # Stop services in reverse order
+    stop_container "proxy-admin"
+    stop_container "proxy-dante"
+    stop_container "proxy-squid"
+    stop_container "proxy-vpn"
+    
+    # Remove containers if requested
+    if [[ "$REMOVE" == "true" ]]; then
+        remove_container "proxy-admin"
+        remove_container "proxy-dante"
+        remove_container "proxy-squid"
+        remove_container "proxy-vpn"
+    fi
+    
+    # Remove images if purging
+    if [[ "$PURGE" == "true" ]]; then
+        remove_images
+    fi
+    
+    # Clear cache if requested
+    if [[ "$CLEAN_CACHE" == "true" ]]; then
+        clear_cache
+    fi
+    
+    log "info" "=========================================="
+    log "info" "Proxy Service Stopped"
+    log "info" "=========================================="
+    
+    show_final_status
+}
+
+main "$@"

@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Proxy Service - Admin Panel</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #e4e4e4;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        header p {
+            color: #888;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 15px;
+            padding: 25px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 40px rgba(0, 212, 255, 0.1);
+        }
+        .card h2 {
+            font-size: 1.2em;
+            margin-bottom: 15px;
+            color: #00d4ff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: bold;
+        }
+        .status.running {
+            background: rgba(0, 255, 136, 0.2);
+            color: #00ff88;
+        }
+        .status.stopped {
+            background: rgba(255, 68, 68, 0.2);
+            color: #ff4444;
+        }
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .info-row:last-child {
+            border-bottom: none;
+        }
+        .info-label {
+            color: #888;
+        }
+        .info-value {
+            font-weight: bold;
+            color: #fff;
+        }
+        .connection-info {
+            background: rgba(0, 212, 255, 0.1);
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+        .connection-info h3 {
+            margin-bottom: 15px;
+            color: #00d4ff;
+        }
+        code {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 3px 8px;
+            border-radius: 5px;
+            font-family: 'Fira Code', monospace;
+        }
+        .cache-bar {
+            height: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 5px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .cache-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+            transition: width 0.5s;
+        }
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            color: #666;
+        }
+        .refresh-btn {
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+            border: none;
+            padding: 10px 30px;
+            border-radius: 25px;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: opacity 0.3s;
+        }
+        .refresh-btn:hover {
+            opacity: 0.8;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🛡️ Proxy Service</h1>
+            <p>Network-wide caching proxy with VPN routing</p>
+        </header>
+        
+        <div class="grid">
+            <div class="card">
+                <h2>🌐 HTTP Proxy</h2>
+                <span class="status running">Running</span>
+                <div class="info-row">
+                    <span class="info-label">Port</span>
+                    <span class="info-value">3128</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Protocol</span>
+                    <span class="info-value">HTTP/HTTPS</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Caching</span>
+                    <span class="info-value">Enabled</span>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>🧦 SOCKS Proxy</h2>
+                <span class="status running">Running</span>
+                <div class="info-row">
+                    <span class="info-label">Port</span>
+                    <span class="info-value">1080</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Protocol</span>
+                    <span class="info-value">SOCKS5</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Authentication</span>
+                    <span class="info-value">Optional</span>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>🔒 VPN Gateway</h2>
+                <span class="status stopped">Disabled</span>
+                <div class="info-row">
+                    <span class="info-label">Status</span>
+                    <span class="info-value">Not Connected</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Provider</span>
+                    <span class="info-value">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">IP Address</span>
+                    <span class="info-value">-</span>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>💾 Cache Status</h2>
+                <div class="info-row">
+                    <span class="info-label">Total Size</span>
+                    <span class="info-value">0 GB</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Max Size</span>
+                    <span class="info-value">50 GB</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Usage</span>
+                    <span class="info-value">0%</span>
+                </div>
+                <div class="cache-bar">
+                    <div class="cache-bar-fill" style="width: 0%"></div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="connection-info">
+            <h3>📋 Connection Information</h3>
+            <p>Configure your devices to use this proxy:</p>
+            <br>
+            <p><strong>HTTP Proxy:</strong> <code>http://YOUR_HOST_IP:3128</code></p>
+            <p><strong>HTTPS Proxy:</strong> <code>http://YOUR_HOST_IP:3128</code></p>
+            <p><strong>SOCKS5 Proxy:</strong> <code>socks5://YOUR_HOST_IP:1080</code></p>
+            <br>
+            <p><strong>For environment variables:</strong></p>
+            <p><code>export HTTP_PROXY=http://YOUR_HOST_IP:3128</code></p>
+            <p><code>export HTTPS_PROXY=http://YOUR_HOST_IP:3128</code></p>
+            <p><code>export ALL_PROXY=socks5://YOUR_HOST_IP:1080</code></p>
+        </div>
+        
+        <div style="text-align: center;">
+            <button class="refresh-btn" onclick="location.reload()">🔄 Refresh Status</button>
+        </div>
+        
+        <footer>
+            <p>Proxy Service v1.0.0 | <a href="/health" style="color: #00d4ff;">Health Check</a></p>
+        </footer>
+    </div>
+</body>
+</html>

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+#######################################
+# Proxy Service Restart Script
+# Restarts all services gracefully
+#######################################
+
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+#######################################
+# Show usage
+#######################################
+usage() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Restart Proxy service.
+
+Options:
+    -h, --help          Show this help message
+    -v, --verbose       Enable verbose output
+    -c, --clean-cache   Clear cache before restart
+
+Examples:
+    $(basename "$0")              Restart services
+    $(basename "$0") -v           Verbose restart
+    $(basename "$0") --clean-cache Restart with cache clear
+EOF
+}
+
+#######################################
+# Main function
+#######################################
+main() {
+    local VERBOSE="false"
+    local CLEAN_CACHE="false"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -v|--verbose)
+                VERBOSE="true"
+                shift
+                ;;
+            -c|--clean-cache)
+                CLEAN_CACHE="true"
+                shift
+                ;;
+            *)
+                echo "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    echo "Restarting Proxy Service..."
+    
+    local stop_args=""
+    local start_args=""
+    
+    [[ "$VERBOSE" == "true" ]] && stop_args="-v"
+    [[ "$VERBOSE" == "true" ]] && start_args="-v"
+    [[ "$CLEAN_CACHE" == "true" ]] && stop_args="$stop_args -c"
+    
+    "$SCRIPT_DIR/stop" $stop_args
+    sleep 2
+    "$SCRIPT_DIR/start" $start_args -s
+}
+
+main "$@"

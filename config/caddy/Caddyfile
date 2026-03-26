@@ -1,0 +1,41 @@
+# Proxy Service Admin Interface
+# Listen on port 80 (mapped to PROXY_ADMIN_PORT)
+:80 {
+    # Enable access logs
+    log {
+        output file /var/log/caddy/access.log
+        format json
+    }
+    
+    # Root directory for static files
+    root * /srv
+    
+    # Enable gzip compression
+    encode gzip zstd
+    
+    # Static file server
+    file_server browse
+    
+    # Health check endpoint
+    handle /health {
+        respond "OK" 200
+    }
+    
+    # API proxy endpoints (for future expansion)
+    handle /api/* {
+        respond {"status": "not implemented"} 501
+    }
+    
+    # Status page
+    handle /status {
+        respond {
+            body {
+                "proxy": {
+                    "http": "${HTTP_PROXY_PORT:-3128}",
+                    "socks": "${SOCKS_PROXY_PORT:-1080}",
+                    "vpn": "${USE_VPN:-false}"
+                }
+            }
+        }
+    }
+}

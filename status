@@ -1,0 +1,369 @@
+#!/usr/bin/env bash
+#######################################
+# Proxy Service Status Script
+# Shows detailed status of all services
+#######################################
+
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/container-runtime.sh"
+
+#######################################
+# Show usage information
+#######################################
+usage() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Show Proxy service status.
+
+Options:
+    -h, --help          Show this help message
+    -v, --verbose       Show detailed information
+    -j, --json          Output in JSON format
+    -w, --watch         Continuously monitor status
+
+Examples:
+    $(basename "$0")              Show status
+    $(basename "$0") -v           Show detailed status
+    $(basename "$0") --json       JSON output
+EOF
+}
+
+#######################################
+# Get container IP address
+# Arguments:
+#   $1 - Container name
+#######################################
+get_container_ip() {
+    local container="$1"
+    
+    case "$CONTAINER_RUNTIME" in
+        podman)
+            podman inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container" 2>/dev/null || echo "N/A"
+            ;;
+        docker)
+            docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container" 2>/dev/null || echo "N/A"
+            ;;
+        *)
+            echo "N/A"
+            ;;
+    esac
+}
+
+#######################################
+# Get container uptime
+# Arguments:
+#   $1 - Container name
+#######################################
+get_container_uptime() {
+    local container="$1"
+    
+    case "$CONTAINER_RUNTIME" in
+        podman)
+            podman inspect -f '{{.State.StartedAt}}' "$container" 2>/dev/null || echo "N/A"
+            ;;
+        docker)
+            docker inspect -f '{{.State.StartedAt}}' "$container" 2>/dev/null || echo "N/A"
+            ;;
+        *)
+            echo "N/A"
+            ;;
+    esac
+}
+
+#######################################
+# Check if port is listening
+# Arguments:
+#   $1 - Port number
+#######################################
+check_port() {
+    local port="$1"
+    
+    if ss -tuln 2>/dev/null | grep -q ":${port} "; then
+        echo "LISTENING"
+    else
+        echo "NOT LISTENING"
+    fi
+}
+
+#######################################
+# Test HTTP proxy connection
+#######################################
+test_http_proxy() {
+    local host="${BIND_ADDRESS:-127.0.0.1}"
+    local port="${HTTP_PROXY_PORT:-3128}"
+    
+    if timeout 5 curl -x "http://${host}:${port}" -s -o /dev/null -w "%{http_code}" "http://connectivitycheck.gstatic.com/generate_204" 2>/dev/null | grep -q "204\|200"; then
+        echo "WORKING"
+    else
+        echo "NOT WORKING"
+    fi
+}
+
+#######################################
+# Test SOCKS proxy connection
+#######################################
+test_socks_proxy() {
+    local host="${BIND_ADDRESS:-127.0.0.1}"
+    local port="${SOCKS_PROXY_PORT:-1080}"
+    
+    if timeout 5 curl -x "socks5://${host}:${port}" -s -o /dev/null -w "%{http_code}" "http://connectivitycheck.gstatic.com/generate_204" 2>/dev/null | grep -q "204\|200"; then
+        echo "WORKING"
+    else
+        echo "NOT WORKING"
+    fi
+}
+
+#######################################
+# Get network statistics
+#######################################
+get_network_stats() {
+    local rx_bytes=0
+    local tx_bytes=0
+    
+    case "$CONTAINER_RUNTIME" in
+        podman)
+            for container in proxy-squid proxy-dante; do
+                if is_container_running "$container"; then
+                    local stats
+                    stats=$(podman stats --no-stream --format "{{.NetIO}}" "$container" 2>/dev/null || echo "0B / 0B")
+                    echo "  $container: $stats"
+                fi
+            done
+            ;;
+        docker)
+            for container in proxy-squid proxy-dante; do
+                if is_container_running "$container"; then
+                    local stats
+                    stats=$(docker stats --no-stream --format "{{.NetIO}}" "$container" 2>/dev/null || echo "0B / 0B")
+                    echo "  $container: $stats"
+                fi
+            done
+            ;;
+    esac
+}
+
+#######################################
+# Show basic status
+#######################################
+show_basic_status() {
+    echo ""
+    echo "╔════════════════════════════════════════════════════════════╗"
+    echo "║              PROXY SERVICE STATUS                          ║"
+    echo "╚════════════════════════════════════════════════════════════╝"
+    echo ""
+    
+    # Container status
+    echo "Container Status:"
+    echo "─────────────────"
+    
+    local containers=(
+        "proxy-squid:HTTP Proxy"
+        "proxy-dante:SOCKS Proxy"
+        "proxy-admin:Admin Panel"
+        "proxy-vpn:VPN Gateway"
+    )
+    
+    for item in "${containers[@]}"; do
+        local container="${item%%:*}"
+        local name="${item##*:}"
+        
+        if is_container_running "$container"; then
+            echo "  ✓ $name ($container): Running"
+        else
+            echo "  ✗ $name ($container): Stopped"
+        fi
+    done
+    
+    echo ""
+    
+    # Port status
+    echo "Port Status:"
+    echo "────────────"
+    echo "  HTTP Proxy  (${HTTP_PROXY_PORT:-3128}): $(check_port ${HTTP_PROXY_PORT:-3128})"
+    echo "  SOCKS Proxy (${SOCKS_PROXY_PORT:-1080}): $(check_port ${SOCKS_PROXY_PORT:-1080})"
+    echo "  Admin Panel (${PROXY_ADMIN_PORT:-8080}): $(check_port ${PROXY_ADMIN_PORT:-8080})"
+    
+    echo ""
+    
+    # Connection tests
+    echo "Connection Tests:"
+    echo "─────────────────"
+    echo "  HTTP Proxy:  $(test_http_proxy)"
+    echo "  SOCKS Proxy: $(test_socks_proxy)"
+    
+    if [[ "${USE_VPN:-false}" == "true" ]]; then
+        echo "  VPN Status:  $(check_vpn_status)"
+    fi
+    
+    echo ""
+    
+    # Cache stats
+    echo "Cache Statistics:"
+    echo "─────────────────"
+    get_cache_stats
+    
+    echo ""
+    echo "════════════════════════════════════════════════════════════"
+}
+
+#######################################
+# Show verbose status
+#######################################
+show_verbose_status() {
+    show_basic_status
+    
+    echo ""
+    echo "Detailed Container Information:"
+    echo "───────────────────────────────"
+    
+    local containers=("proxy-squid" "proxy-dante" "proxy-admin" "proxy-vpn")
+    
+    for container in "${containers[@]}"; do
+        if is_container_running "$container"; then
+            echo ""
+            echo "=== $container ==="
+            echo "  IP Address: $(get_container_ip "$container")"
+            echo "  Started: $(get_container_uptime "$container")"
+            echo "  Status: $(get_container_status "$container")"
+        fi
+    done
+    
+    echo ""
+    echo "Network Statistics:"
+    echo "───────────────────"
+    get_network_stats
+    
+    echo ""
+    echo "Configuration:"
+    echo "──────────────"
+    echo "  Container Runtime: ${CONTAINER_RUNTIME:-unknown}"
+    echo "  VPN Enabled: ${USE_VPN:-false}"
+    echo "  Cache Directory: ${CACHE_DIR:-not set}"
+    echo "  Log Directory: ${LOG_DIR:-not set}"
+    echo "  Log Level: ${LOG_LEVEL:-info}"
+    echo "  Timezone: ${TZ:-UTC}"
+}
+
+#######################################
+# Show JSON status
+#######################################
+show_json_status() {
+    local squid_running="false"
+    local dante_running="false"
+    local admin_running="false"
+    local vpn_running="false"
+    
+    is_container_running "proxy-squid" && squid_running="true"
+    is_container_running "proxy-dante" && dante_running="true"
+    is_container_running "proxy-admin" && admin_running="true"
+    is_container_running "proxy-vpn" && vpn_running="true"
+    
+    cat << EOF
+{
+    "status": {
+        "http_proxy": {
+            "container": "proxy-squid",
+            "running": $squid_running,
+            "port": ${HTTP_PROXY_PORT:-3128},
+            "port_status": "$(check_port ${HTTP_PROXY_PORT:-3128})",
+            "connection_test": "$(test_http_proxy)"
+        },
+        "socks_proxy": {
+            "container": "proxy-dante",
+            "running": $dante_running,
+            "port": ${SOCKS_PROXY_PORT:-1080},
+            "port_status": "$(check_port ${SOCKS_PROXY_PORT:-1080})",
+            "connection_test": "$(test_socks_proxy)"
+        },
+        "admin": {
+            "container": "proxy-admin",
+            "running": $admin_running,
+            "port": ${PROXY_ADMIN_PORT:-8080}
+        },
+        "vpn": {
+            "container": "proxy-vpn",
+            "running": $vpn_running,
+            "status": "$(check_vpn_status)"
+        }
+    },
+    "config": {
+        "runtime": "${CONTAINER_RUNTIME:-unknown}",
+        "vpn_enabled": ${USE_VPN:-false},
+        "cache_dir": "${CACHE_DIR:-not set}",
+        "log_level": "${LOG_LEVEL:-info}"
+    }
+}
+EOF
+}
+
+#######################################
+# Watch mode
+#######################################
+watch_status() {
+    while true; do
+        clear
+        show_basic_status
+        echo ""
+        echo "Press Ctrl+C to exit watch mode"
+        sleep 5
+    done
+}
+
+#######################################
+# Main function
+#######################################
+main() {
+    local VERBOSE="false"
+    local JSON="false"
+    local WATCH="false"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -v|--verbose)
+                VERBOSE="true"
+                shift
+                ;;
+            -j|--json)
+                JSON="true"
+                shift
+                ;;
+            -w|--watch)
+                WATCH="true"
+                shift
+                ;;
+            *)
+                log "error" "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Load environment
+    load_environment
+    
+    # Initialize runtime
+    if ! init_runtime; then
+        CONTAINER_RUNTIME="none"
+    fi
+    
+    # Show status
+    if [[ "$WATCH" == "true" ]]; then
+        watch_status
+    elif [[ "$JSON" == "true" ]]; then
+        show_json_status
+    elif [[ "$VERBOSE" == "true" ]]; then
+        show_verbose_status
+    else
+        show_basic_status
+    fi
+}
+
+main "$@"

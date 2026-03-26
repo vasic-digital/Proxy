@@ -1,0 +1,599 @@
+#!/usr/bin/env bash
+#######################################
+# Proxy Service Initialization Script
+# Validates environment, creates directories,
+# and prepares configuration files
+#######################################
+
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/container-runtime.sh"
+
+#######################################
+# Show usage information
+# Globals:
+#   None
+# Arguments:
+#   None
+# Outputs:
+#   Usage text to stdout
+# Returns:
+#   0 always
+#######################################
+usage() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Initialize Proxy service environment.
+
+Options:
+    -h, --help          Show this help message
+    -v, --verbose       Enable verbose output
+    -f, --force         Force reinitialization
+    -c, --check         Only check configuration, don't modify
+
+Examples:
+    $(basename "$0")              Initialize environment
+    $(basename "$0") --check      Validate configuration only
+    $(basename "$0") -fv          Force verbose reinitialization
+EOF
+}
+
+#######################################
+# Check if required tools are available
+# Globals:
+#   None
+# Arguments:
+#   None
+# Outputs:
+#   Status messages
+# Returns:
+#   0 if all dependencies met, 1 otherwise
+#######################################
+check_dependencies() {
+    log "info" "Checking dependencies..."
+    
+    local missing=()
+    
+    if ! command -v curl &> /dev/null; then
+        missing+=("curl")
+    fi
+    
+    if ! command -v openssl &> /dev/null; then
+        missing+=("openssl")
+    fi
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log "error" "Missing dependencies: ${missing[*]}"
+        log "error" "Install with: sudo apt install ${missing[*]}"
+        return 1
+    fi
+    
+    log "info" "All dependencies satisfied"
+    return 0
+}
+
+#######################################
+# Validate environment configuration
+# Globals:
+#   Various .env variables
+# Arguments:
+#   None
+# Outputs:
+#   Validation status
+# Returns:
+#   0 if valid, 1 otherwise
+#######################################
+validate_environment() {
+    log "info" "Validating environment..."
+    local errors=0
+    
+    if [[ -z "${HTTP_PROXY_PORT:-}" ]]; then
+        log "warn" "HTTP_PROXY_PORT not set, using default: 3128"
+    fi
+    
+    if [[ -z "${SOCKS_PROXY_PORT:-}" ]]; then
+        log "warn" "SOCKS_PROXY_PORT not set, using default: 1080"
+    fi
+    
+    if [[ "${USE_VPN:-false}" == "true" ]]; then
+        if [[ -z "${VPN_USERNAME:-}" ]]; then
+            log "error" "USE_VPN=true but VPN_USERNAME not set"
+            ((errors++))
+        fi
+        
+        if [[ -z "${VPN_PASSWORD:-}" ]]; then
+            log "error" "USE_VPN=true but VPN_PASSWORD not set"
+            ((errors++))
+        fi
+        
+        if [[ -z "${VPN_OVPN_PATH:-}" ]]; then
+            log "error" "USE_VPN=true but VPN_OVPN_PATH not set"
+            ((errors++))
+        elif [[ ! -f "${VPN_OVPN_PATH}" ]]; then
+            log "error" "VPN config file not found: $VPN_OVPN_PATH"
+            ((errors++))
+        fi
+    fi
+    
+    if [[ "${CACHE_DIR:-}" != /* ]]; then
+        log "warn" "CACHE_DIR is relative, consider using absolute path"
+    fi
+    
+    if [[ $errors -gt 0 ]]; then
+        log "error" "Environment validation failed with $errors error(s)"
+        return 1
+    fi
+    
+    log "info" "Environment validation passed"
+    return 0
+}
+
+#######################################
+# Create VPN authentication file
+# Globals:
+#   VPN_USERNAME, VPN_PASSWORD, SCRIPT_DIR
+# Arguments:
+#   None
+# Outputs:
+#   Status messages
+# Returns:
+#   0 on success
+#######################################
+create_vpn_auth() {
+    if [[ "${USE_VPN:-false}" != "true" ]]; then
+        return 0
+    fi
+    
+    local auth_file="$SCRIPT_DIR/vpn-auth.txt"
+    
+    if [[ -f "$auth_file" ]] && [[ "${FORCE:-false}" != "true" ]]; then
+        log "info" "VPN auth file exists, skipping (use --force to overwrite)"
+        return 0
+    fi
+    
+    log "info" "Creating VPN authentication file..."
+    
+    cat > "$auth_file" << EOF
+${VPN_USERNAME}
+${VPN_PASSWORD}
+EOF
+    
+    chmod 600 "$auth_file"
+    log "info" "VPN auth file created: $auth_file"
+}
+
+#######################################
+# Create Squid proxy configuration
+# Globals:
+#   HTTP_PROXY_PORT, CACHE_DIR, CACHE_MAX_SIZE_GB, etc.
+# Arguments:
+#   None
+# Outputs:
+#   Status messages
+# Returns:
+#   0 on success
+#######################################
+create_squid_config() {
+    local squid_conf="$SCRIPT_DIR/config/squid/squid.conf"
+    local squid_conf_template="$SCRIPT_DIR/config/squid/squid.conf.template"
+    
+    log "info" "Creating Squid configuration..."
+    
+    local cache_size_mb=$((CACHE_MAX_SIZE_GB * 1024))
+    local cache_mem_mb="${CACHE_MEMORY_SIZE_MB:-512}"
+    local max_object_size="${CACHE_MAX_OBJECT_SIZE_MB:-100}"
+    local min_object_size="${CACHE_MIN_OBJECT_SIZE_KB:-1}"
+    
+    cat > "$squid_conf" << EOF
+# Squid Proxy Configuration
+# Auto-generated by init script
+# Do not edit directly - use environment variables
+
+# Network Settings
+http_port ${HTTP_PROXY_PORT:-3128} accel vhost allow-direct
+http_port ${HTTP_PROXY_PORT:-3128} intercept
+
+# Cache Directory Configuration
+cache_dir aufs ${CACHE_DIR}/squid ${cache_size_mb} 16 256
+cache_mem ${cache_mem_mb} MB
+
+# Object Size Limits
+maximum_object_size ${max_object_size} MB
+minimum_object_size ${min_object_size} KB
+maximum_object_size_in_memory 4 MB
+
+# Cache Replacement Policy
+cache_replacement_policy lru
+memory_replacement_policy lru
+
+# Access Control Lists
+acl localnet src 0.0.0.1-0.255.255.255
+acl localnet src 10.0.0.0/8
+acl localnet src 100.64.0.0/10
+acl localnet src 127.0.0.0/8
+acl localnet src 169.254.0.0/16
+acl localnet src 172.16.0.0/12
+acl localnet src 192.168.0.0/16
+acl localnet src fc00::/7
+acl localnet src fe80::/10
+
+# SSL/TLS Ports
+acl SSL_ports port 443
+acl Safe_ports port 80
+acl Safe_ports port 21
+acl Safe_ports port 443
+acl Safe_ports port 70
+acl Safe_ports port 210
+acl Safe_ports port 1025-65535
+acl Safe_ports port 280
+acl Safe_ports port 488
+acl Safe_ports port 591
+acl Safe_ports port 777
+
+# CONNECT method ACL
+acl CONNECT method CONNECT
+
+# Access Rules
+http_access deny !Safe_ports
+http_access deny CONNECT !SSL_ports
+http_access allow localhost manager
+http_access deny manager
+http_access allow localnet
+http_access allow localhost
+http_access deny all
+
+# Logging
+access_log /var/log/squid/access.log squid
+cache_log /var/log/squid/cache.log
+cache_store_log /var/log/squid/store.log
+logfile_rotate 5
+
+# PID file
+pid_filename /var/run/squid/squid.pid
+
+# Coredump directory
+coredump_dir /var/spool/squid
+
+# Refresh Patterns
+refresh_pattern ^ftp:           1440    20%     10080
+refresh_pattern ^gopher:        1440    0%      1440
+refresh_pattern -i (/cgi-bin/|\?) 0     0%      0
+refresh_pattern .               0       20%     4320
+
+# DNS Configuration
+dns_nameservers ${DNS_SERVERS:-8.8.8.8 8.8.4.4}
+positive_dns_ttl ${DNS_CACHE_TTL:-3600} seconds
+negative_dns_ttl 30 seconds
+
+# Performance Tuning
+server_persistent_connections on
+client_persistent_connections on
+half_closed_clients off
+EOF
+
+    chmod 644 "$squid_conf"
+    log "info" "Squid configuration created: $squid_conf"
+}
+
+#######################################
+# Create Dante SOCKS proxy configuration
+# Globals:
+#   SOCKS_PROXY_PORT, BIND_ADDRESS
+# Arguments:
+#   None
+# Outputs:
+#   Status messages
+# Returns:
+#   0 on success
+#######################################
+create_dante_config() {
+    local dante_conf="$SCRIPT_DIR/config/dante/sockd.conf"
+    
+    log "info" "Creating Dante SOCKS configuration..."
+    
+    local bind_addr="${BIND_ADDRESS:-0.0.0.0}"
+    local socks_port="${SOCKS_PROXY_PORT:-1080}"
+    
+    cat > "$dante_conf" << EOF
+# Dante SOCKS Proxy Configuration
+# Auto-generated by init script
+
+# Logging
+logoutput: /var/log/sockd.log
+
+# Internal interface (clients connect here)
+internal: ${bind_addr} port = ${socks_port}
+
+# External interface (outgoing connections)
+external: eth0
+
+# Authentication methods (none for simplicity)
+method: username none
+
+# Access Rules
+clientblock {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    log: error
+}
+
+# Allow connections from local networks
+client pass {
+    from: 10.0.0.0/8 to: 0.0.0.0/0
+    log: error
+}
+
+client pass {
+    from: 172.16.0.0/12 to: 0.0.0.0/0
+    log: error
+}
+
+client pass {
+    from: 192.168.0.0/16 to: 0.0.0.0/0
+    log: error
+}
+
+client pass {
+    from: 127.0.0.0/8 to: 0.0.0.0/0
+    log: error
+}
+
+# Block everything else
+client block {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    log: connect error
+}
+
+# Allow outgoing connections to any destination
+pass {
+    from: 10.0.0.0/8 to: 0.0.0.0/0
+    log: error
+}
+
+pass {
+    from: 172.16.0.0/12 to: 0.0.0.0/0
+    log: error
+}
+
+pass {
+    from: 192.168.0.0/16 to: 0.0.0.0/0
+    log: error
+}
+
+pass {
+    from: 127.0.0.0/8 to: 0.0.0.0/0
+    log: error
+}
+
+# Block all other outgoing
+block {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    log: connect error
+}
+EOF
+
+    chmod 644 "$dante_conf"
+    log "info" "Dante configuration created: $dante_conf"
+}
+
+#######################################
+# Create streaming cache configuration
+# Globals:
+#   STREAMING_CACHE_ENABLED, STREAMING_DOMAINS
+# Arguments:
+#   None
+# Outputs:
+#   Status messages
+# Returns:
+#   0 on success
+#######################################
+create_streaming_config() {
+    local streaming_conf="$SCRIPT_DIR/config/streaming.conf"
+    
+    log "info" "Creating streaming cache configuration..."
+    
+    if [[ "${STREAMING_CACHE_ENABLED:-true}" != "true" ]]; then
+        log "info" "Streaming cache disabled"
+        return 0
+    fi
+    
+    local streaming_domains="${STREAMING_DOMAINS:-youtube.com,googlevideo.com,ytimg.com}"
+    local chunk_size="${STREAMING_CHUNK_SIZE_KB:-256}"
+    
+    cat > "$streaming_conf" << EOF
+# Streaming Cache Configuration
+# Domains for video/audio streaming cache
+
+# Enabled domains (regex patterns)
+STREAMING_DOMAINS="${streaming_domains}"
+
+# Chunk size for partial content caching
+CHUNK_SIZE_KB=${chunk_size}
+
+# Maximum streaming cache duration (seconds)
+MAX_STREAMING_TTL=86400
+
+# Enable range request handling
+RANGE_REQUESTS=true
+
+# Buffer size for streaming
+STREAM_BUFFER_KB=1024
+EOF
+
+    chmod 644 "$streaming_conf"
+    log "info" "Streaming cache configuration created: $streaming_conf"
+}
+
+#######################################
+# Create cache invalidation script
+# Globals:
+#   CACHE_DIR, CACHE_MAX_AGE_DAYS
+# Arguments:
+#   None
+# Outputs:
+#   Status messages
+# Returns:
+#   0 on success
+#######################################
+create_cache_invalidator() {
+    local invalidator="$SCRIPT_DIR/scripts/cache-invalidator.sh"
+    
+    log "info" "Creating cache invalidation script..."
+    
+    cat > "$invalidator" << 'INVALIDATOR'
+#!/usr/bin/env bash
+#######################################
+# Cache Invalidation Script
+# Removes stale and oversized cache entries
+#######################################
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/container-runtime.sh"
+
+CACHE_DIR="${CACHE_DIR:-./cache}"
+CACHE_MAX_AGE_DAYS="${CACHE_MAX_AGE_DAYS:-30}"
+CACHE_MAX_SIZE_GB="${CACHE_MAX_SIZE_GB:-50}"
+
+log "info" "Starting cache invalidation..."
+log "info" "Cache directory: $CACHE_DIR"
+log "info" "Max age: $CACHE_MAX_AGE_DAYS days"
+log "info" "Max size: $CACHE_MAX_SIZE_GB GB"
+
+# Remove files older than max age
+if [[ "$CACHE_MAX_AGE_DAYS" -gt 0 ]]; then
+    log "info" "Removing files older than $CACHE_MAX_AGE_DAYS days..."
+    find "$CACHE_DIR" -type f -mtime +$CACHE_MAX_AGE_DAYS -delete 2>/dev/null || true
+fi
+
+# Remove empty directories
+log "info" "Cleaning empty directories..."
+find "$CACHE_DIR" -type d -empty -delete 2>/dev/null || true
+
+# Check cache size and remove oldest files if over limit
+current_size_kb=$(du -sk "$CACHE_DIR" 2>/dev/null | cut -f1)
+max_size_kb=$((CACHE_MAX_SIZE_GB * 1024 * 1024))
+
+if [[ $current_size_kb -gt $max_size_kb ]]; then
+    log "warn" "Cache over size limit: ${current_size_kb}KB > ${max_size_kb}KB"
+    log "info" "Removing oldest files to reduce size..."
+    
+    # List files by access time, oldest first, and remove until under limit
+    while [[ $current_size_kb -gt $max_size_kb ]]; do
+        oldest_file=$(find "$CACHE_DIR" -type f -printf '%A@ %p\n' 2>/dev/null | sort -n | head -1 | cut -d' ' -f2-)
+        if [[ -z "$oldest_file" ]]; then
+            break
+        fi
+        rm -f "$oldest_file"
+        current_size_kb=$(du -sk "$CACHE_DIR" 2>/dev/null | cut -f1)
+    done
+fi
+
+log "info" "Cache invalidation complete"
+get_cache_stats
+INVALIDATOR
+
+    chmod +x "$invalidator"
+    log "info" "Cache invalidator created: $invalidator"
+}
+
+#######################################
+# Main initialization function
+# Globals:
+#   FORCE, CHECK_ONLY, VERBOSE
+# Arguments:
+#   Command line arguments
+# Outputs:
+#   Initialization status
+# Returns:
+#   0 on success, 1 on failure
+#######################################
+main() {
+    local FORCE="false"
+    local CHECK_ONLY="false"
+    local VERBOSE="false"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -f|--force)
+                FORCE="true"
+                shift
+                ;;
+            -c|--check)
+                CHECK_ONLY="true"
+                shift
+                ;;
+            -v|--verbose)
+                VERBOSE="true"
+                shift
+                ;;
+            *)
+                log "error" "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    export FORCE VERBOSE LOG_LEVEL
+    [[ "$VERBOSE" == "true" ]] && LOG_LEVEL="debug"
+    
+    log "info" "=========================================="
+    log "info" "Proxy Service Initialization"
+    log "info" "=========================================="
+    
+    # Load environment
+    load_environment
+    
+    # Check dependencies
+    if ! check_dependencies; then
+        exit 1
+    fi
+    
+    # Check container runtime
+    if ! init_runtime; then
+        exit 1
+    fi
+    
+    log "info" "Container runtime: $CONTAINER_RUNTIME"
+    log "info" "Compose command: $COMPOSE_CMD"
+    
+    # Validate environment
+    if ! validate_environment; then
+        exit 1
+    fi
+    
+    if [[ "$CHECK_ONLY" == "true" ]]; then
+        log "info" "Configuration check complete (no changes made)"
+        exit 0
+    fi
+    
+    # Create directories
+    create_directories
+    
+    # Create configuration files
+    create_squid_config
+    create_dante_config
+    create_streaming_config
+    create_cache_invalidator
+    
+    # Create VPN auth if needed
+    create_vpn_auth
+    
+    log "info" "=========================================="
+    log "info" "Initialization Complete"
+    log "info" "=========================================="
+    log "info" "HTTP Proxy Port: ${HTTP_PROXY_PORT:-3128}"
+    log "info" "SOCKS Proxy Port: ${SOCKS_PROXY_PORT:-1080}"
+    log "info" "Admin Port: ${PROXY_ADMIN_PORT:-8080}"
+    log "info" "VPN Enabled: ${USE_VPN:-false}"
+    log "info" "Cache Directory: ${CACHE_DIR}"
+}
+
+main "$@"
