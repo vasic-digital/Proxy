@@ -8,8 +8,9 @@
 #   - proxy-admin: Web admin interface
 #
 # Profiles:
-#   - vpn: Enables VPN routing
-#   - no-vpn: Direct connection (default)
+#   - vpn: Enables containerized VPN routing
+#   - no-vpn: Uses host network (including host VPN if active)
+#   - host-vpn: Uses host network mode (routes through host's VPN)
 #############################################
 
 version: "3.8"
@@ -60,12 +61,70 @@ services:
   # Squid - HTTP/HTTPS Caching Proxy
   # Comprehensive caching for web content
   #############################################
+  
+  # Squid with containerized VPN
   proxy-squid:
     image: ubuntu/squid:latest
     container_name: proxy-squid
     hostname: proxy-squid
     profiles:
       - vpn
+    environment:
+      - TZ=${TZ:-UTC}
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+    volumes:
+      - ./config/squid/squid.conf:/etc/squid/squid.conf:ro
+      - ${CACHE_DIR:-./cache}/squid:/var/spool/squid
+      - ${LOG_DIR:-./logs}:/var/log/squid
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "squid", "-k", "check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    network_mode: service:proxy-vpn
+    depends_on:
+      proxy-vpn:
+        condition: service_healthy
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # Squid with host network (routes through host's VPN if active)
+  proxy-squid-host:
+    image: ubuntu/squid:latest
+    container_name: proxy-squid
+    hostname: proxy-squid
+    profiles:
+      - host-vpn
+    environment:
+      - TZ=${TZ:-UTC}
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+    volumes:
+      - ./config/squid/squid.conf:/etc/squid/squid.conf:ro
+      - ${CACHE_DIR:-./cache}/squid:/var/spool/squid
+      - ${LOG_DIR:-./logs}:/var/log/squid
+    network_mode: host
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "squid", "-k", "check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # Squid standalone (no VPN, bridge network)
+  proxy-squid-standalone:
+    image: ubuntu/squid:latest
+    container_name: proxy-squid
+    hostname: proxy-squid
+    profiles:
       - no-vpn
     environment:
       - TZ=${TZ:-UTC}
@@ -85,10 +144,6 @@ services:
       retries: 3
     networks:
       proxy-net:
-    depends_on:
-      proxy-vpn:
-        condition: service_healthy
-        required: false
     ulimits:
       nofile:
         soft: 65536
@@ -98,12 +153,56 @@ services:
   # Dante - SOCKS5 Proxy
   # SOCKS protocol support
   #############################################
+  
+  # Dante with containerized VPN
   proxy-dante:
     image: vimagick/dante:latest
     container_name: proxy-dante
     hostname: proxy-dante
     profiles:
       - vpn
+    environment:
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ./config/dante/sockd.conf:/etc/sockd.conf:ro
+      - ${LOG_DIR:-./logs}:/var/log
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pgrep", "sockd"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    network_mode: service:proxy-vpn
+    depends_on:
+      proxy-vpn:
+        condition: service_healthy
+
+  # Dante with host network (routes through host's VPN if active)
+  proxy-dante-host:
+    image: vimagick/dante:latest
+    container_name: proxy-dante
+    hostname: proxy-dante
+    profiles:
+      - host-vpn
+    environment:
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ./config/dante/sockd.conf:/etc/sockd.conf:ro
+      - ${LOG_DIR:-./logs}:/var/log
+    network_mode: host
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pgrep", "sockd"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Dante standalone (no VPN, bridge network)
+  proxy-dante-standalone:
+    image: vimagick/dante:latest
+    container_name: proxy-dante
+    hostname: proxy-dante
+    profiles:
       - no-vpn
     environment:
       - TZ=${TZ:-UTC}
@@ -120,11 +219,6 @@ services:
       retries: 3
     networks:
       proxy-net:
-    depends_on:
-      proxy-vpn:
-        condition: service_healthy
-        required: false
-    network_mode: service:proxy-vpn
 
   #############################################
   # Admin Interface - Caddy Web Server
@@ -136,7 +230,7 @@ services:
     hostname: proxy-admin
     profiles:
       - vpn
-      - no-vpn
+      - host-vpn
     environment:
       - TZ=${TZ:-UTC}
     volumes:
@@ -165,6 +259,7 @@ services:
     hostname: cache-invalidator
     profiles:
       - vpn
+      - host-vpn
       - no-vpn
     environment:
       - TZ=${TZ:-UTC}

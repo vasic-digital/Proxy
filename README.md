@@ -363,3 +363,37 @@ See [LICENSE](LICENSE) for license information.
 
 - **Issues**: [GitHub Issues](https://github.com/vasic-digital/Proxy/issues)
 - **Documentation**: See `docs/` directory for detailed documentation
+
+## Network Modes Explained
+
+### Mode 1: Containerized VPN (`USE_VPN=true`)
+```
+Client → Proxy → VPN Container → VPN Server → Internet
+```
+- VPN runs inside a container
+- Complete isolation
+- Best for dedicated proxy server
+
+### Mode 2: Host VPN Pass-through (`--host-vpn`)
+```
+Client → Proxy (host network) → Host VPN → VPN Server → Internet
+```
+- Uses host's existing VPN connection
+- Containers share host network namespace
+- Best when host already has VPN
+
+### Mode 3: No VPN (`--no-vpn` or `USE_VPN=false`)
+```
+Client → Proxy → Direct Internet
+```
+- No VPN routing
+- Bridge network isolation
+- Best for local caching only
+
+### Quick Comparison
+
+| Mode | Command | VPN Source | Network |
+|------|---------|------------|---------|
+| Containerized | `./start` (with `USE_VPN=true`) | Container | VPN container |
+| Host Pass-through | `./start --host-vpn` | Host system | Host network |
+| No VPN | `./start --no-vpn` | None | Bridge |
